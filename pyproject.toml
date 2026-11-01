@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "git-insight"
+dynamic = ["version"]
+description = "Terminal, HTML and JSON statistics for local Git repositories: authors, activity heatmap, bug-fix hotspots, bus factor."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["git", "statistics", "analytics", "cli", "bus-factor", "repository"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Version Control :: Git",
+]
+# The parser talks to the `git` executable directly (streaming `git log --numstat`),
+# so GitPython is not needed.
+dependencies = [
+    "click>=8.1",
+    "rich>=13.0",
+    "plotext>=5.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff"]
+
+[project.urls]
+# Must point at the team's public repository (course requirement). Change if the repo has another owner.
+Homepage = "https://github.com/Hanchatwer123/git-insight"
+Repository = "https://github.com/Hanchatwer123/git-insight"
+Documentation = "https://github.com/Hanchatwer123/git-insight#readme"
+Issues = "https://github.com/Hanchatwer123/git-insight/issues"
+
+[project.scripts]
+git-insight = "git_insight.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "git_insight.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["git_insight*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# The HTML/rich renderers are dense, template-like code; tests contain long literals.
+"git_insight/formatter.py" = ["E501"]
+"tests/*" = ["E501"]
