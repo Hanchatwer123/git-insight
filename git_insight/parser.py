@@ -131,3 +131,112 @@ class LogFilter:
     def __post_init__(self) -> None:
         if self.rev is not None and self.rev.startswith("-"):
             raise GitInsightError(f"Invalid revision {self.rev!r}: it must not start with '-'.")
+
+
+# ----------------------------------------------------------------- running git
+
+
+def _git_env() -> Dict[str, str]:
+    return {**os.environ, **_GIT_ENV_OVERRIDES}
+
+
+def _run_git(args: Sequence[str], cwd: Path) -> "subprocess.CompletedProcess[str]":
+    """Run ``git <args>`` in ``cwd`` and capture its output."""
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            env=_git_env(),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise GitNotInstalledError("The 'git' executable was not found in PATH.") from exc
+    except PermissionError as exc:
+        raise GitInsightError(f"Permission denied while running git in {cwd}: {exc}") from exc
+    except OSError as exc:
+        raise GitInsightError(f"Could not run git in {cwd}: {exc}") from exc
+
+
+def resolve_repo(path: Union[str, Path] = ".") -> Path:
+    """Return the root of the repository that contains ``path``.
+
+    Raises:
+        NotAGitRepositoryError: ``path`` is missing, not a directory, or not in a repository.
+        GitInsightError: git refuses to read the repository (e.g. unsafe ownership).
+        GitNotInstalledError: git is not installed.
+    """
+    start = Path(path).expanduser()
+    try:
+        if not start.exists():
+            raise NotAGitRepositoryError(f"Path does not exist: {start}")
+        if not start.is_dir():
+            raise NotAGitRepositoryError(f"Not a directory: {start}")
+    except PermissionError as exc:
+        raise GitInsightError(f"Permission denied: cannot access {start}") from exc
+
+    top = _run_git(["rev-parse", "--show-toplevel"], start)
+    if top.returncode == 0 and top.stdout.strip():
+        return Path(top.stdout.strip())
+    if "dubious ownership" in top.stderr:
+        raise GitInsightError(
+            f"Git refuses to read {start.resolve()} (the directory is owned by another user). "
+            f"If you trust it, run: git config --global --add safe.directory {start.resolve()}"
+        )
+    # A bare repository has no work tree, so --show-toplevel fails but --git-dir works.
+    if _run_git(["rev-parse", "--git-dir"], start).returncode == 0:
+        return start.resolve()
+    raise NotAGitRepositoryError(f"{start.resolve()} is not inside a Git repository.")
+
+
+def ensure_has_commits(repo: Path, rev: Optional[str] = None) -> None:
+    """Fail with a clear message if ``rev`` (default ``HEAD``) does not point at a commit.
+
+    Raises:
+        EmptyRepositoryError: the repository has no commits yet.
+        GitInsightError: ``rev`` is not a known branch, tag or commit.
+    """
+    target = rev or "HEAD"
+    proc = _run_git(["rev-parse", "--verify", "--quiet", f"{target}^{{commit}}"], repo)
+    if proc.returncode != 0:
+        if rev is None:
+            raise EmptyRepositoryError("The repository has no commits yet.")
+        raise GitInsightError(f"Unknown branch, tag or revision: {rev!r}")
+
+
+def _filter_args(flt: LogFilter) -> List[str]:
+    # Values are attached with '=' so they can never be mistaken for options.
+    args: List[str] = []
+    if not flt.include_merges:
+        args.append("--no-merges")
+    if flt.author:
+        args += ["--regexp-ignore-case", f"--author={flt.author}"]
+    if flt.since:
+        args.append(f"--since={flt.since}")
+    if flt.until:
+        args.append(f"--until={flt.until}")
+    args += [flt.rev or "HEAD", "--"]
+    return args
+
+
+def count_commits(repo: Path, flt: Optional[LogFilter] = None) -> int:
+    """Count the commits :func:`iter_commits` would yield (cheap; used for progress bars)."""
+    flt = flt or LogFilter()
+    proc = _run_git(["rev-list", "--count", *_filter_args(flt)], repo)
+    if proc.returncode != 0:
+        raise GitCommandError(f"git rev-list failed: {proc.stderr.strip() or 'unknown error'}")
+    try:
+        return int(proc.stdout.strip())
+    except ValueError as exc:
+        raise GitCommandError(f"Unexpected output from git rev-list: {proc.stdout!r}") from exc
+
+
+def list_tracked_files(repo: Path, rev: Optional[str] = None) -> Optional[Set[str]]:
+    """Return the files that exist at ``rev`` (default ``HEAD``), or ``None`` if unavailable."""
+    proc = _run_git(["ls-tree", "-r", "--name-only", "-z", rev or "HEAD"], repo)
+    if proc.returncode != 0:
+        return None
+    return {p for p in proc.stdout.split("\0") if p}
