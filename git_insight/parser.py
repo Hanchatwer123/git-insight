@@ -240,3 +240,97 @@ def list_tracked_files(repo: Path, rev: Optional[str] = None) -> Optional[Set[st
     if proc.returncode != 0:
         return None
     return {p for p in proc.stdout.split("\0") if p}
+
+
+# ---------------------------------------------------------------------- parsing
+
+
+def parse_log(lines: Iterable[str]) -> Iterator[Commit]:
+    """Parse the text produced by ``git log --numstat`` with our custom format.
+
+    Each commit starts with a line beginning with the record separator, followed by
+    ``added<TAB>deleted<TAB>path`` lines. Binary files report ``-`` and count as 0.
+    Malformed commit headers are skipped.
+    """
+    header: Optional[List[str]] = None
+    files: List[FileChange] = []
+
+    for raw in lines:
+        line = raw.rstrip("\r\n")
+        if line.startswith(_RS):
+            if header is not None:
+                yield _make_commit(header, files)
+            fields = line[1:].split(_US, 4)
+            header = fields if len(fields) == 5 else None
+            files = []
+        elif header is not None and line:
+            parts = line.split("\t", 2)
+            if len(parts) == 3:
+                added, deleted, path = parts
+                files.append(
+                    FileChange(
+                        path=path,
+                        added=int(added) if added.isdigit() else 0,
+                        deleted=int(deleted) if deleted.isdigit() else 0,
+                    )
+                )
+    if header is not None:
+        yield _make_commit(header, files)
+
+
+def _make_commit(header: List[str], files: List[FileChange]) -> Commit:
+    sha, name, email, iso_date, subject = header
+    try:
+        date = datetime.fromisoformat(iso_date)
+    except ValueError as exc:
+        raise GitCommandError(f"Unexpected date format from git: {iso_date!r}") from exc
+    return Commit(sha, name, email, date, subject, tuple(files))
+
+
+def iter_commits(repo: Path, flt: Optional[LogFilter] = None) -> Iterator[Commit]:
+    """Stream commits (newest first) with per-file line statistics.
+
+    The git process is killed if the caller stops iterating early.
+
+    Raises:
+        GitNotInstalledError: git is not installed.
+        GitCommandError: git exited with an error.
+    """
+    flt = flt or LogFilter()
+    args = ["-c", "core.quotepath=off", "log", "--numstat", "--no-renames", _PRETTY]
+    args += _filter_args(flt)
+
+    # stderr goes to a temp file so a chatty git can never block on a full pipe.
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as stderr:
+        try:
+            proc = subprocess.Popen(
+                ["git", *args],
+                cwd=repo,
+                env=_git_env(),
+                stdout=subprocess.PIPE,
+                stderr=stderr,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except FileNotFoundError as exc:
+            raise GitNotInstalledError("The 'git' executable was not found in PATH.") from exc
+        except OSError as exc:
+            raise GitInsightError(f"Could not run git in {repo}: {exc}") from exc
+
+        finished = False
+        try:
+            if proc.stdout is None:  # pragma: no cover - PIPE always provides stdout
+                raise GitCommandError("Could not read git output.")
+            yield from parse_log(proc.stdout)
+            finished = True
+        finally:
+            if not finished:
+                proc.kill()
+            if proc.stdout is not None:
+                proc.stdout.close()
+            proc.wait()
+
+        if proc.returncode != 0:
+            stderr.seek(0)
+            raise GitCommandError(f"git log failed: {stderr.read().strip() or 'unknown error'}")
