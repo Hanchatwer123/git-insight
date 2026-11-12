@@ -89,3 +89,56 @@ def test_empty_input():
     r = compute_report([])
     assert r.summary.total_commits == 0 and r.authors == [] and r.hot_files == []
     assert r.summary.first_commit is None and r.bus_factor is None
+
+
+def test_bus_factor_single_author_is_one():
+    bf = compute_bus_factor({"a": {"x": 10}, "b": {"x": 5}}, {"x": "X"})
+    assert bf.value == 1 and bf.risk == "critical" and bf.owners[0].share == 1.0
+
+
+def test_bus_factor_two_balanced_authors_is_two():
+    # Each owns half of the files alone: losing one leaves exactly 50% lost, which is not "more than half".
+    files = {"f1": {"a": 9}, "f2": {"a": 9}, "f3": {"b": 9}, "f4": {"b": 9}}
+    bf = compute_bus_factor(files, {"a": "A", "b": "B"})
+    assert bf.value == 2 and bf.risk == "warning"
+
+
+def test_bus_factor_dominant_author():
+    files = {"f1": {"a": 9}, "f2": {"a": 9}, "f3": {"a": 9}, "f4": {"b": 9}}
+    assert compute_bus_factor(files, {"a": "A", "b": "B"}).value == 1
+
+
+def test_shared_knowledge_raises_bus_factor():
+    # Everyone wrote a similar share of every file, so nobody is a single point of failure.
+    files = {f"f{i}": {"a": 5, "b": 5, "c": 5} for i in range(6)}
+    bf = compute_bus_factor(files, {"a": "A", "b": "B", "c": "C"})
+    assert bf.value == 3 and bf.risk == "healthy"
+
+
+def test_bus_factor_without_files():
+    assert compute_bus_factor({}, {}) is None
+    assert compute_bus_factor({"f": {"a": 0}}, {"a": "A"}) is None
+
+
+def test_report_on_real_repository(sample_repo):
+    from git_insight.parser import list_tracked_files
+
+    report = compute_report(iter_commits(sample_repo.path), list_tracked_files(sample_repo.path))
+    s = report.summary
+    assert (s.total_commits, s.total_authors, s.active_days) == (5, 2, 4)
+    assert (s.lines_added, s.lines_deleted, s.files_touched) == (10, 2, 5)
+    alice, bob = report.authors
+    assert (alice.name, alice.commits, alice.added, alice.deleted) == ("Alice", 3, 6, 2)
+    assert (bob.name, bob.commits, bob.added, bob.deleted) == ("Bob", 2, 4, 0)
+    assert report.activity.hours[23] == 1 and report.activity.weekdays[4] == 1  # Fri 23h
+    assert report.hot_files[0].path == "app.py" and report.hot_files[0].changes == 4
+    assert report.bus_factor.value == 1 and report.bus_factor.owners[0].name == "Bob"  # Bob owns 3 of 5 files
+
+
+def test_report_to_dict_is_json_friendly(sample_repo):
+    import json
+
+    report = compute_report(iter_commits(sample_repo.path))
+    data = json.loads(json.dumps(report_to_dict(report, top=1)))
+    assert len(data["authors"]) == 1 and data["authors"][0]["churn"] == 8
+    assert data["summary"]["first_commit"].startswith("2024-01-01T10:00:00")
