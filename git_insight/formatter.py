@@ -156,3 +156,100 @@ def _contributors(authors: List[AuthorStats], *, by: str, top: int, title: str):
             _bar(key(author), peak),
         )
     return table
+
+
+def render_terminal(
+    report: Report,
+    *,
+    title: str = "git-insight",
+    subtitle: str = "",
+    top: int = 10,
+    console: Optional["Console"] = None,
+) -> None:
+    """Print the report to the terminal with rich panels, tables and charts."""
+    from rich import box
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+
+    console = console or Console()
+    s = report.summary
+
+    console.print(
+        Panel(
+            Text(subtitle or "full history", style="dim"),
+            title=Text(title, style="bold"),
+            border_style="cyan",
+            expand=False,
+        )
+    )
+
+    grid = Table.grid(padding=(0, 3))
+    for style in ("dim", "bold", "dim", "bold"):
+        grid.add_column(style=style)
+    grid.add_row("Commits", f"{s.total_commits:,}", "Authors", f"{s.total_authors:,}")
+    grid.add_row("Active days", f"{s.active_days:,}", "Time span", f"{s.span_days:,} days")
+    grid.add_row("First commit", _day(s.first_commit), "Last commit", _day(s.last_commit))
+    grid.add_row(
+        "Lines added",
+        Text(f"+{s.lines_added:,}", style="green"),
+        "Lines deleted",
+        Text(f"-{s.lines_deleted:,}", style="red"),
+    )
+    grid.add_row("Files touched", f"{s.files_touched:,}", "", "")
+    console.print(Panel(grid, title="Overview", border_style="cyan", expand=False))
+
+    console.print(_contributors(report.authors, by="commits", top=top, title="Top contributors by commits"))
+    console.print(_contributors(report.authors, by="lines", top=top, title="Top contributors by lines changed"))
+
+    act = report.activity
+    console.print(
+        Panel(
+            _chart(_HOUR_LABELS, act.hours, "Commits by hour of day", console, cell=3),
+            title="Activity by hour (author local time)",
+            border_style="blue",
+        )
+    )
+    console.print(
+        Panel(
+            _chart(list(WEEKDAYS), act.weekdays, "Commits by weekday", console, cell=6),
+            title="Activity by weekday",
+            border_style="blue",
+        )
+    )
+    console.print(Panel(_heatmap(report), title="Activity heatmap (weekday x hour)", border_style="blue", expand=False))
+
+    if report.hot_files:
+        peak = report.hot_files[0].changes
+        table = Table(title="Hot files (most frequently changed)", box=box.SIMPLE_HEAD, title_justify="left", title_style="bold")
+        table.add_column("#", justify="right", style="dim")
+        table.add_column("File", overflow="fold")
+        table.add_column("Changes", justify="right")
+        table.add_column("Churn", justify="right")
+        table.add_column("Authors", justify="right")
+        table.add_column("Bug fixes", justify="right")
+        table.add_column("", no_wrap=True)
+        for i, hot in enumerate(report.hot_files[:top], 1):
+            fixes = f"{hot.fixes:,} ({hot.fix_ratio:.0%})" if hot.fixes else "-"
+            table.add_row(
+                str(i), Text(hot.path), f"{hot.changes:,}", f"{hot.churn:,}", str(hot.authors),
+                Text(fixes, style="red" if hot.fix_ratio >= 0.3 else ""),
+                _bar(hot.changes, peak, style="yellow"),
+            )
+        console.print(table)
+
+    bf = report.bus_factor
+    if bf is None:
+        console.print(Text("Bus factor: not available (filtered by author, or no files to analyse).", style="dim"))
+        return
+    body = Text()
+    body.append(f"Bus factor: {bf.value}", style=_RISK_STYLE[bf.risk])
+    body.append(f"  ({_RISK_TEXT[bf.risk]})\n", style="dim")
+    body.append(f"Based on {bf.files_total:,} files; an author 'knows' a file if they wrote "
+                f">= {bf.knowledge_share:.0%} of it.\n\n", style="dim")
+    for owner in bf.owners[: min(top, 5)]:
+        body.append(f"{owner.name:<28.28} ", style="bold")
+        body.append("█" * max(1, round(owner.share * 30)), style=_RISK_STYLE[bf.risk])
+        body.append(f" {owner.share:.0%} of files ({owner.files_owned:,})\n")
+    console.print(Panel(body, title="Bus factor", border_style=_RISK_STYLE[bf.risk].split()[-1], expand=False))
