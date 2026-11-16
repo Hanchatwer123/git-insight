@@ -253,3 +253,130 @@ def render_terminal(
         body.append("█" * max(1, round(owner.share * 30)), style=_RISK_STYLE[bf.risk])
         body.append(f" {owner.share:.0%} of files ({owner.files_owned:,})\n")
     console.print(Panel(body, title="Bus factor", border_style=_RISK_STYLE[bf.risk].split()[-1], expand=False))
+
+
+# -------------------------------------------------------------------------- html
+
+_CSS = """
+:root{--bg:#f6f8fa;--card:#fff;--fg:#1f2328;--muted:#656d76;--line:#d0d7de;--accent:#0969da;--add:#1a7f37;--del:#cf222e;--heat:46,160,67}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--card:#161b22;--fg:#e6edf3;--muted:#8d96a0;--line:#30363d;--accent:#58a6ff;--add:#3fb950;--del:#f85149}}
+*{box-sizing:border-box}body{margin:0;padding:24px 16px;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
+main{max-width:960px;margin:0 auto}h1{margin:0 0 4px;font-size:26px}h2{font-size:17px;margin:0 0 12px}
+.sub{color:var(--muted);margin:0 0 20px}.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px;overflow-x:auto}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-bottom:16px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px}.stat b{display:block;font-size:22px}.stat>span{color:var(--muted);font-size:13px}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);font-size:14px;vertical-align:middle}
+th{color:var(--muted);font-weight:600}td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}.add{color:var(--add)}.del{color:var(--del)}
+.bar{background:var(--line);border-radius:4px;height:8px;min-width:80px}.bar>span{display:block;height:100%;border-radius:4px;background:var(--accent)}
+.cols{display:flex;align-items:flex-end;gap:3px;height:140px}.col{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;font-size:11px;color:var(--muted)}
+.col i{display:block;width:100%;background:var(--accent);border-radius:3px 3px 0 0}.heat td{width:3.4%;height:22px;padding:0;border:2px solid var(--card);border-radius:4px;text-align:center;font-size:10px;color:var(--muted)}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;word-break:break-all}.risk{font-weight:700}.critical{color:var(--del)}.warning{color:#bf8700}.healthy{color:var(--add)}
+"""
+
+
+def _pct(value: int, peak: int) -> float:
+    return 100 * value / peak if peak else 0.0
+
+
+def _html_bar(value: int, peak: int) -> str:
+    return f'<div class="bar"><span style="width:{_pct(value, peak):.1f}%"></span></div>'
+
+
+def _html_columns(labels: Sequence[str], values: Sequence[int]) -> str:
+    peak = max(values) or 1
+    cols = "".join(
+        f'<div class="col" title="{html.escape(label)}: {value}">'
+        f'<i style="height:{_pct(value, peak):.1f}%"></i>{html.escape(label)}</div>'
+        for label, value in zip(labels, values)
+    )
+    return f'<div class="cols">{cols}</div>'
+
+
+def render_html(report: Report, *, title: str = "git-insight report", subtitle: str = "", top: int = 10) -> str:
+    """Return a self-contained HTML page (all text is escaped, no external requests)."""
+    e = html.escape
+    s = report.summary
+    parts: List[str] = []
+
+    stats = [
+        ("Commits", f"{s.total_commits:,}"), ("Authors", f"{s.total_authors:,}"),
+        ("Active days", f"{s.active_days:,}"), ("Lines added", f'<span class="add">+{s.lines_added:,}</span>'),
+        ("Lines deleted", f'<span class="del">-{s.lines_deleted:,}</span>'), ("Files touched", f"{s.files_touched:,}"),
+    ]
+    parts.append('<div class="stats">' + "".join(
+        f'<div class="stat"><b>{value}</b><span>{label}</span></div>' for label, value in stats) + "</div>")
+
+    def contributors(heading: str, key) -> str:
+        ranked = sorted(report.authors, key=lambda a: (-key(a), a.name.lower()))[:top]
+        peak = key(ranked[0]) if ranked else 0
+        rows = "".join(
+            f'<tr><td class="n">{i}</td><td>{e(a.name)}</td><td class="n">{a.commits:,}</td>'
+            f'<td class="n add">+{a.added:,}</td><td class="n del">-{a.deleted:,}</td><td>{_html_bar(key(a), peak)}</td></tr>'
+            for i, a in enumerate(ranked, 1)
+        )
+        return (f'<section class="card"><h2>{heading}</h2><table><tr><th class="n">#</th><th>Author</th>'
+                f'<th class="n">Commits</th><th class="n">+Lines</th><th class="n">-Lines</th><th></th></tr>{rows}</table></section>')
+
+    parts.append(contributors("Top contributors by commits", lambda a: a.commits))
+    parts.append(contributors("Top contributors by lines changed", lambda a: a.churn))
+
+    act = report.activity
+    parts.append(f'<section class="card"><h2>Activity by hour (author local time)</h2>{_html_columns(_HOUR_LABELS, act.hours)}</section>')
+    parts.append(f'<section class="card"><h2>Activity by weekday</h2>{_html_columns(list(WEEKDAYS), act.weekdays)}</section>')
+
+    peak = max((v for row in act.heatmap for v in row), default=0)
+    head = "<tr><th></th>" + "".join(f"<th>{h if h % 3 == 0 else ''}</th>" for h in range(24)) + "</tr>"
+    body = ""
+    for day, row in zip(WEEKDAYS, act.heatmap):
+        cells = "".join(
+            f'<td title="{day} {h:02d}:00 - {v} commit(s)" style="background:rgba(var(--heat),{0.12 + 0.88 * v / peak:.2f})"></td>'
+            if v else f'<td title="{day} {h:02d}:00 - 0" style="background:var(--line);opacity:.4"></td>'
+            for h, v in enumerate(row)
+        )
+        body += f"<tr><th>{day}</th>{cells}</tr>"
+    parts.append(f'<section class="card"><h2>Activity heatmap</h2><table class="heat">{head}{body}</table></section>')
+
+    if report.hot_files:
+        peak_changes = report.hot_files[0].changes
+        rows = "".join(
+            f'<tr><td class="n">{i}</td><td><code>{e(h.path)}</code></td><td class="n">{h.changes:,}</td>'
+            f'<td class="n">{h.churn:,}</td><td class="n">{h.authors}</td>'
+            f'<td class="n">{f"{h.fixes:,} ({h.fix_ratio:.0%})" if h.fixes else "-"}</td>'
+            f'<td>{_html_bar(h.changes, peak_changes)}</td></tr>'
+            for i, h in enumerate(report.hot_files[:top], 1)
+        )
+        parts.append('<section class="card"><h2>Hot files</h2><table><tr><th class="n">#</th><th>File</th>'
+                     '<th class="n">Changes</th><th class="n">Churn</th><th class="n">Authors</th>'
+                     f'<th class="n">Bug fixes</th><th></th></tr>{rows}</table></section>')
+
+    bf = report.bus_factor
+    if bf is None:
+        parts.append('<section class="card"><h2>Bus factor</h2><p class="sub">Not available (filtered by author, or no files to analyse).</p></section>')
+    else:
+        owners = "".join(
+            f"<tr><td>{e(o.name)}</td><td class=\"n\">{o.files_owned:,}</td><td class=\"n\">{o.share:.0%}</td>"
+            f"<td>{_html_bar(o.files_owned, bf.owners[0].files_owned)}</td></tr>"
+            for o in bf.owners[: min(top, 5)]
+        )
+        parts.append(
+            f'<section class="card"><h2>Bus factor: <span class="risk {bf.risk}">{bf.value}</span></h2>'
+            f'<p class="sub">{e(_RISK_TEXT[bf.risk])}. Based on {bf.files_total:,} files; an author "knows" a file '
+            f"if they wrote at least {bf.knowledge_share:.0%} of it.</p>"
+            f'<table><tr><th>Owner</th><th class="n">Files</th><th class="n">Share</th><th></th></tr>{owners}</table></section>'
+        )
+
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        f"<title>{e(title)}</title><style>{_CSS}</style></head><body><main>"
+        f'<h1>{e(title)}</h1><p class="sub">{e(subtitle or "full history")} &middot; '
+        f"{_day(s.first_commit)} to {_day(s.last_commit)}</p>{''.join(parts)}</main></body></html>\n"
+    )
+
+
+# -------------------------------------------------------------------------- json
+
+
+def render_json(report: Report, *, top: Optional[int] = None) -> str:
+    """Return the report as pretty-printed JSON."""
+    return json.dumps(report_to_dict(report, top), indent=2, ensure_ascii=False)
