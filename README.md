@@ -34,10 +34,10 @@ formats (terminal, self-contained HTML, JSON) from the same analysis.
 ## Install
 
 ```bash
-pip install git-insight-cli
+pip install git-insight-tool
 ```
 
-The PyPI package is `git-insight-cli`; the command it installs is `git-insight`.
+The PyPI package is `git-insight-tool`; the command it installs is `git-insight`.
 
 Requires Python 3.9+ and the `git` executable. Dependencies: `click`, `rich`, `plotext`.
 
@@ -77,7 +77,7 @@ git-insight --format json > stats.json       # machine-readable
 ### In Jupyter / JupyterHub
 
 ```python
-%pip install git-insight-cli
+%pip install git-insight-tool
 !git-insight /path/to/repo -n 5
 ```
 
